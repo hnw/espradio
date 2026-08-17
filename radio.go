@@ -663,6 +663,32 @@ func postWiFiStart() {
 	C.espradio_save_rom_ptrs()
 }
 
+// Stop stops the Wi-Fi driver and powers down the radio.
+//
+// It blocks until the station successfully stops or a 15-second timeout occurs.
+// Note that Stop is station-oriented; if the radio is configured for soft-AP
+// only, this function will hit the 15-second timeout.
+//
+// Stop does not undo Enable(). Init-time state remains active, so a subsequent
+// Start() will reuse it. Callers must manually re-establish the AP association
+// and DHCP state after restarting.
+func Stop() error {
+	stopMu.Lock()
+	stopResult = make(chan struct{}, 1)
+	stopMu.Unlock()
+
+	if code := C.esp_wifi_stop(); code != C.ESP_OK {
+		return makeError(code)
+	}
+
+	select {
+	case <-stopResult:
+		return nil
+	case <-time.After(15 * time.Second):
+		return makeError(C.ESP_ERR_TIMEOUT)
+	}
+}
+
 // DebugISRCount returns the number of WiFi ISR invocations (for debugging).
 func DebugISRCount() uint32 {
 	return uint32(C.espradio_get_wifi_isr_count())
@@ -955,6 +981,8 @@ func Scan() ([]AccessPoint, error) {
 var (
 	connectMu     sync.Mutex
 	connectResult chan ConnectResult
+	stopMu        sync.Mutex
+	stopResult    chan struct{}
 )
 
 // Connect configures STA credentials and initiates association.
@@ -1032,6 +1060,17 @@ func espradio_on_wifi_event(eventID int32, data unsafe.Pointer) {
 		if ch != nil {
 			select {
 			case ch <- ConnectResult{Connected: false, Reason: uint8(ev.reason)}:
+			default:
+			}
+		}
+
+	case C.WIFI_EVENT_STA_STOP:
+		stopMu.Lock()
+		ch := stopResult
+		stopMu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- struct{}{}:
 			default:
 			}
 		}
