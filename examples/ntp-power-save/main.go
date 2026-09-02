@@ -1,12 +1,13 @@
 // This example shows how to use espradio.Stop() to power down the Wi-Fi driver
 // between uses.  It is the pattern for battery-powered applications that only
-// need the network occasionally, e.g. a clock: every syncInterval the radio
-// starts, the clock syncs with NTP over DHCP + DNS, and the radio stops again.
-// On an ESP32 this drops roughly 50 mA of system current while the radio is down.
+// need the network occasionally, e.g. a clock: every syncInterval the clock
+// syncs with NTP over DHCP + DNS, and the radio stops again until the next
+// cycle.  On an ESP32 this drops roughly 50 mA of system current while the
+// radio is down.
 //
-// Note that Stop() does not undo Enable(): init-time state survives, but the
-// AP association and the DHCP lease do not.  Each cycle therefore reconnects
-// and runs DHCP from scratch.
+// Note that Stop() does not undo Enable(): init-time state, the netdev and the
+// stack survive a stop, but the AP association and the DHCP lease do not.
+// Each cycle therefore reconnects and runs DHCP again.
 //
 // tinygo flash -target xiao-esp32c3 -ldflags="-X main.ssid=YourSSID -X main.password=YourPassword" -monitor ./examples/ntp-power-save
 package main
@@ -39,7 +40,7 @@ func main() {
 	time.Sleep(time.Second)
 
 	println("initializing radio...")
-	// Enable once; Stop() does not undo it, so every cycle only needs Start()
+	// Enable once; Stop() does not undo it, so later cycles only need Start()
 	// to bring the radio back.
 	err := espradio.Enable(espradio.Config{
 		Logging: espradio.LogLevelError,
@@ -48,54 +49,16 @@ func main() {
 		failure("could not enable radio: " + err.Error())
 	}
 
-	for cycle := 1; ; cycle++ {
-		println("--- sync cycle", cycle, "---")
-		syncTime()
-		println("radio is down; sleeping", syncInterval.String(), "until next sync")
-		time.Sleep(syncInterval)
-	}
-}
-
-// syncTime brings the radio up, syncs the clock with NTP, then powers the
-// radio back down.  A failed cycle is reported on serial; the next cycle
-// simply retries.
-func syncTime() {
 	println("starting radio...")
 	if err := espradio.Start(); err != nil {
-		println("start failed:", err.Error())
-		return
+		failure("could not start radio: " + err.Error())
 	}
 
-	syncClock()
-
-	println("stopping radio...")
-	if err := espradio.Stop(); err != nil {
-		println("stop failed:", err.Error())
-		return
-	}
-	println("radio stopped.")
-}
-
-// syncClock connects to the AP, gets an IP address with DHCP and syncs the
-// clock with NTP.  The poll loop it starts is retired before it returns, so
-// nothing is left running while the radio is down.
-func syncClock() {
-	println("connecting to", ssid, "...")
-	err := espradio.Connect(espradio.STAConfig{
-		SSID:     ssid,
-		Password: password,
-	})
-	if err != nil {
-		println("connect failed:", err.Error())
-		return
-	}
-	println("connected to", ssid, "!")
-
+	// The netdev and the stack are created once and reused by every cycle.
 	println("starting L2 netdev...")
 	nd, err := espradio.StartNetDev()
 	if err != nil {
-		println("netdev failed:", err.Error())
-		return
+		failure("netdev failed: " + err.Error())
 	}
 
 	println("creating lneto stack...")
@@ -105,34 +68,65 @@ func syncClock() {
 		MaxTCPPorts: 1,
 	})
 	if err != nil {
-		println("stack failed:", err.Error())
-		return
+		failure("stack failed: " + err.Error())
 	}
 
-	// Poll the stack in the background while the network is up.
-	done := make(chan struct{})
-	go stackLoop(stack, done)
-	defer func() {
-		close(done)
-		// Let the poll loop finish any in-flight send before the radio goes
-		// down underneath it.
-		time.Sleep(100 * time.Millisecond)
-	}()
+	// Poll the stack in the background for the lifetime of the program.
+	go stackLoop(stack)
+
+	for cycle := 1; ; cycle++ {
+		println("--- sync cycle", cycle, "---")
+		syncTime(stack)
+		println("radio is down; sleeping", syncInterval.String(), "until next sync")
+		time.Sleep(syncInterval)
+
+		// Bring the radio back for the next cycle.
+		println("starting radio...")
+		if err := espradio.Start(); err != nil {
+			failure("could not restart radio: " + err.Error())
+		}
+	}
+}
+
+// syncTime connects to the AP, gets an IP address with DHCP and syncs the
+// clock with NTP, then powers the radio back down.  A failed cycle is
+// reported on serial; the next cycle simply retries.
+func syncTime(stack *espradio.Stack) {
+	println("connecting to", ssid, "...")
+	err := espradio.Connect(espradio.STAConfig{
+		SSID:     ssid,
+		Password: password,
+	})
+	if err != nil {
+		println("connect failed:", err.Error())
+		espradio.Stop()
+		return
+	}
+	println("connected to", ssid, "!")
 
 	println("starting DHCP...")
 	dhcp, err := stack.SetupWithDHCP(espradio.DHCPConfig{})
 	if err != nil {
 		println("DHCP failed:", err.Error())
+		espradio.Stop()
 		return
 	}
 	addr, ok := netip.AddrFromSlice(dhcp.AssignedAddr4[:])
 	if !ok {
 		println("invalid IP address")
+		espradio.Stop()
 		return
 	}
 	println("got IP:", addr.String())
 
 	ntpSync(stack)
+
+	println("stopping radio...")
+	if err := espradio.Stop(); err != nil {
+		println("stop failed:", err.Error())
+		return
+	}
+	println("radio stopped.")
 }
 
 // ntpSync looks up the NTP host with DNS and queries it for the current time,
@@ -157,13 +151,8 @@ func ntpSync(stack *espradio.Stack) {
 	println("NTP success:", time.Now().String())
 }
 
-func stackLoop(stack *espradio.Stack, done <-chan struct{}) {
+func stackLoop(stack *espradio.Stack) {
 	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
 		send, recv, err := stack.RecvAndSend()
 		if send == 0 && recv == 0 {
 			time.Sleep(pollTime)
