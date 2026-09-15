@@ -99,7 +99,7 @@ func syncTime(stack *espradio.Stack) {
 	})
 	if err != nil {
 		println("connect failed:", err.Error())
-		espradio.Stop()
+		stopRadio()
 		return
 	}
 	println("connected to", ssid, "!")
@@ -108,13 +108,13 @@ func syncTime(stack *espradio.Stack) {
 	dhcp, err := stack.SetupWithDHCP(espradio.DHCPConfig{})
 	if err != nil {
 		println("DHCP failed:", err.Error())
-		espradio.Stop()
+		stopRadio()
 		return
 	}
 	addr, ok := netip.AddrFromSlice(dhcp.AssignedAddr4[:])
 	if !ok {
 		println("invalid IP address")
-		espradio.Stop()
+		stopRadio()
 		return
 	}
 	println("got IP:", addr.String())
@@ -122,11 +122,14 @@ func syncTime(stack *espradio.Stack) {
 	ntpSync(stack)
 
 	println("stopping radio...")
-	if err := espradio.Stop(); err != nil {
-		println("stop failed:", err.Error())
-		return
-	}
+	stopRadio()
 	println("radio stopped.")
+}
+
+func stopRadio() {
+	if err := espradio.Stop(); err != nil {
+		failure("could not stop radio: " + err.Error())
+	}
 }
 
 // ntpSync looks up the NTP host with DNS and queries it for the current time,
