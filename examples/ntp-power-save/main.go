@@ -157,11 +157,13 @@ func ntpSync(stack *espradio.Stack) {
 func stackLoop(stack *espradio.Stack) {
 	for {
 		send, recv, err := stack.RecvAndSend()
-		if send == 0 && recv == 0 {
-			time.Sleep(pollTime)
-		}
 		if err != nil {
 			println("poll err:", err.Error())
+			time.Sleep(pollTime)
+			continue
+		}
+		if send == 0 && recv == 0 {
+			time.Sleep(pollTime)
 		}
 	}
 }

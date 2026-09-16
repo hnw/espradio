@@ -630,8 +630,6 @@ func Start() error {
 	// ppInitTxq, etc.) and the critical ROM pointer variables (pTxRx,
 	// our_tx_eb, …) get initialised, then snapshot them.
 	postWiFiStart()
-	atomic.StoreUint32(&wifiStarted, 1)
-	C.espradio_netif_set_tx_enabled(1)
 
 	return nil
 }
@@ -663,6 +661,8 @@ func postWiFiStart() {
 		startReadyAfterPass = readyNeverSentinel
 	}
 	C.espradio_save_rom_ptrs()
+	atomic.StoreUint32(&wifiStarted, 1)
+	C.espradio_netif_set_tx_enabled(1)
 }
 
 // Stop stops the Wi-Fi driver and powers down the radio. Stop on an already
@@ -676,23 +676,28 @@ func postWiFiStart() {
 //
 // The radio API is not safe for concurrent use; the caller must serialize
 // Enable/Start/StartAP/Stop/Connect/Scan. After Stop succeeds, Start or
-// StartAP may be called again.
+// StartAP may be called again. If stopping fails, the driver remains running
+// and its TX gate is restored.
 func Stop() error {
 	if atomic.LoadUint32(&wifiStarted) == 0 {
 		return nil
 	}
 
 	C.espradio_netif_set_tx_enabled(0)
+	start := timeUsNow()
 	for C.espradio_netif_tx_busy() != 0 {
-		runtime.Gosched()
+		if !safeGosched() || timeUsNow()-start >= stopTxQuiesceUs {
+			C.espradio_netif_set_tx_enabled(1)
+			return makeError(C.ESP_ERR_TIMEOUT)
+		}
 	}
 
-	C.espradio_netif_set_connected(0)
-
 	if code := C.esp_wifi_stop(); code != C.ESP_OK {
+		C.espradio_netif_set_tx_enabled(1)
 		return makeError(code)
 	}
 
+	C.espradio_netif_set_connected(0)
 	atomic.StoreUint32(&wifiStarted, 0)
 	return nil
 }
@@ -1073,6 +1078,9 @@ func espradio_on_wifi_event(eventID int32, data unsafe.Pointer) {
 			}
 		}
 
+	case C.WIFI_EVENT_STA_STOP:
+		C.espradio_netif_set_connected(0)
+
 	case C.WIFI_EVENT_STA_START:
 	}
 }
@@ -1104,8 +1112,6 @@ func StartAP(cfg APConfig) error {
 
 	// Same post-start sequence as Start().
 	postWiFiStart()
-	atomic.StoreUint32(&wifiStarted, 1)
-	C.espradio_netif_set_tx_enabled(1)
 
 	return nil
 }
@@ -1208,6 +1214,10 @@ func safeGosched() bool {
 // of any kind.  Generous: it should never be reached in normal operation, and
 // hitting it means genuine cross-goroutine contention that is not resolving.
 const mutexLockTimeoutUs = 250_000
+
+// stopTxQuiesceUs matches the existing mutex wait: long enough for a normal
+// TX completion, but short enough that a wedged TX cannot hang Stop.
+const stopTxQuiesceUs = 250_000
 
 //export espradio_task_yield_go
 func espradio_task_yield_go() {
