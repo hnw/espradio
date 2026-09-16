@@ -665,19 +665,8 @@ func postWiFiStart() {
 	C.espradio_netif_set_tx_enabled(1)
 }
 
-// Stop stops the Wi-Fi driver and powers down the radio. Stop on an already
-// stopped or never-started driver is a no-op.
-//
-// Stop does not undo Enable(), and a NetDev/Stack pair keeps working across
-// stop/start cycles: reuse them rather than calling StartNetDev/NewStack
-// again (a second StartNetDev resets the netdev's receive handler).  What
-// does not survive a stop is the AP association and the DHCP lease: re-run
-// Connect and SetupWithDHCP after the next Start().
-//
-// The radio API is not safe for concurrent use; the caller must serialize
-// Enable/Start/StartAP/Stop/Connect/Scan. After Stop succeeds, Start or
-// StartAP may be called again. If stopping fails, the driver remains running
-// and its TX gate is restored.
+// Stop stops the Wi-Fi driver and powers down the radio.
+// It does nothing if the driver is not started.
 func Stop() error {
 	if atomic.LoadUint32(&wifiStarted) == 0 {
 		return nil
@@ -994,9 +983,7 @@ func Scan() ([]AccessPoint, error) {
 var (
 	connectMu     sync.Mutex
 	connectResult chan ConnectResult
-	// wifiStarted tracks whether Start/StartAP has succeeded without a
-	// subsequent successful Stop.
-	wifiStarted uint32
+	wifiStarted   uint32
 )
 
 // Connect configures STA credentials and initiates association.
@@ -1215,8 +1202,7 @@ func safeGosched() bool {
 // hitting it means genuine cross-goroutine contention that is not resolving.
 const mutexLockTimeoutUs = 250_000
 
-// stopTxQuiesceUs matches the existing mutex wait: long enough for a normal
-// TX completion, but short enough that a wedged TX cannot hang Stop.
+// stopTxQuiesceUs is the maximum time Stop waits for active TX to finish.
 const stopTxQuiesceUs = 250_000
 
 //export espradio_task_yield_go

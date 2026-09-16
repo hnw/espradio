@@ -186,15 +186,7 @@ Got webpage request!
 
 ### ntp-power-save
 
-Syncs the clock with NTP every minute, powering the Wi-Fi radio down with
-`espradio.Stop()` between syncs. This is the pattern for battery-powered apps
-that only need the network occasionally, e.g. a clock: each cycle starts the
-radio, reconnects, gets an IP address with DHCP, syncs the time, then stops the
-radio again. On an ESP32 the radio accounts for roughly 50 mA of system current.
-
-Note that `Stop()` does not undo `Enable()`: the AP association and DHCP lease
-do not survive a stop/start, so each cycle reconnects and runs DHCP again. The
-netdev and the lneto stack are created once and reused by every cycle.
+Synchronizes the clock with NTP once per minute and stops Wi-Fi between syncs. Reuses the same network device and stack across stop/start cycles. On an M5Stack with the original ESP32, stopping Wi-Fi reduced system current by about 50 mA in one test.
 
 ```
 $ tinygo flash -target xiao-esp32c3 -ldflags="-X main.ssid=yourssid -X main.password=YourPasswordHere" -monitor ./examples/ntp-power-save

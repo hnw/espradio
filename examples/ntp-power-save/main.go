@@ -1,13 +1,5 @@
-// This example shows how to use espradio.Stop() to power down the Wi-Fi driver
-// between uses.  It is the pattern for battery-powered applications that only
-// need the network occasionally, e.g. a clock: every syncInterval the clock
-// syncs with NTP over DHCP + DNS, and the radio stops again until the next
-// cycle.  On an ESP32 this drops roughly 50 mA of system current while the
-// radio is down.
-//
-// Note that Stop() does not undo Enable(): init-time state, the netdev and the
-// stack survive a stop, but the AP association and the DHCP lease do not.
-// Each cycle therefore reconnects and runs DHCP again.
+// This example stops Wi-Fi between NTP synchronization cycles.
+// It reuses the network device and stack after each Start call.
 //
 // tinygo flash -target xiao-esp32c3 -ldflags="-X main.ssid=YourSSID -X main.password=YourPassword" -monitor ./examples/ntp-power-save
 package main
@@ -40,8 +32,7 @@ func main() {
 	time.Sleep(time.Second)
 
 	println("initializing radio...")
-	// Enable once; Stop() does not undo it, so later cycles only need Start()
-	// to bring the radio back.
+	// Enable the driver once. Later cycles only call Start.
 	err := espradio.Enable(espradio.Config{
 		Logging: espradio.LogLevelError,
 	})
@@ -54,7 +45,6 @@ func main() {
 		failure("could not start radio: " + err.Error())
 	}
 
-	// The netdev and the stack are created once and reused by every cycle.
 	println("starting L2 netdev...")
 	nd, err := espradio.StartNetDev()
 	if err != nil {
@@ -71,7 +61,6 @@ func main() {
 		failure("stack failed: " + err.Error())
 	}
 
-	// Poll the stack in the background for the lifetime of the program.
 	go stackLoop(stack)
 
 	for cycle := 1; ; cycle++ {
@@ -80,7 +69,6 @@ func main() {
 		println("radio is down; sleeping", syncInterval.String(), "until next sync")
 		time.Sleep(syncInterval)
 
-		// Bring the radio back for the next cycle.
 		println("starting radio...")
 		if err := espradio.Start(); err != nil {
 			failure("could not restart radio: " + err.Error())
@@ -88,9 +76,7 @@ func main() {
 	}
 }
 
-// syncTime connects to the AP, gets an IP address with DHCP and syncs the
-// clock with NTP, then powers the radio back down.  A failed cycle is
-// reported on serial; the next cycle simply retries.
+// syncTime updates the clock and then stops Wi-Fi.
 func syncTime(stack *espradio.Stack) {
 	println("connecting to", ssid, "...")
 	err := espradio.Connect(espradio.STAConfig{
@@ -132,8 +118,7 @@ func stopRadio() {
 	}
 }
 
-// ntpSync looks up the NTP host with DNS and queries it for the current time,
-// adjusting the runtime clock with the measured offset.
+// ntpSync gets the time from the NTP server and updates the runtime clock.
 func ntpSync(stack *espradio.Stack) {
 	println("resolving ntp host:", ntpHost)
 	rstack := stack.LnetoStack().StackRetrying(pollBackoff)
