@@ -266,7 +266,11 @@ esp_err_t espradio_wifi_init(void) {
      * where higher-offset field writes (bit 3+) could OR back onto offset 0
      * and zero cfg.osi_funcs.
      *
-     * Use 512-byte alignment to also avoid the Wi-Fi start failure. See #68. */
+     * Use 512-byte alignment to avoid the Wi-Fi failure observed when
+     * cfg is placed at addr % 0x200 == 0x100. This workaround depends on
+     * the current linker layout and can stop working if that layout changes.
+     * See #68. */
+
     static wifi_init_config_t cfg __attribute__((aligned(512)));
     memset(&cfg, 0, sizeof(cfg));
     cfg.osi_funcs              = s_heap_osi_funcs;
